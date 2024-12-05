@@ -1,63 +1,86 @@
 import os
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, unquote
-# 시작하기전에 pip install requests beautifulsoup4 이거 꼭 하셈
+from urllib.parse import urlparse, urljoin, unquote
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
-# 1. 대상 페이지 URL
-url = "https://wiki.biligame.com/klbq/表情包"  # 님이 원하는 경로고
-base_url = "https://wiki.biligame.com"  # 님이 정한 상대 경로를 절대 경로로 변환할 기본 URL 임 해당 사이트용도이니 어지간해서는 터치 하지말고
+# V2.0
 
-# 2. 저장할 폴더 경로 설정 님 컴퓨터 드라이브 거기 설정하면 됨 ㅇㅇ
-save_folder = "G:\\Images"  # 여기가 저장경로고
-os.makedirs(save_folder, exist_ok=True)  # 없으면 생성할꺼임
+# 대상 페이지 URL
+url = "https://wiki.biligame.com/klbq/表情包" # 요기만 수정해줘 나머지는 건들지 말아줬음 좋겠어
+base_url = "https://wiki.biligame.com"
+save_folder = "G:\\Images"  # 저장 경로
+os.makedirs(save_folder, exist_ok=True)
 
-# 3. HTML에서 이미지 URL을 추출하는 함수
-# 건들지마
+# 사용자 에이전트 설정
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+}
+
+# 세션 설정 및 재시도 정책 추가
+session = requests.Session()
+retries = Retry(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+session.mount("http://", HTTPAdapter(max_retries=retries))
+session.mount("https://", HTTPAdapter(max_retries=retries))
+
+# 섬네일 URL을 원본 URL로 변환
+def convert_to_original_url(image_url):
+    if "thumb" in image_url:
+        return image_url.replace("/thumb", "").split(".png")[0] + ".png"
+    return image_url
+
+# HTML에서 이미지 URL 추출
 def get_image_urls(page_url):
-    response = requests.get(page_url)
-    if response.status_code != 200:
-        print(f"페이지를 가져오지 못했습니다. 상태 코드: {response.status_code}")
+    try:
+        response = session.get(page_url, headers=headers, timeout=(5, 30))
+        response.raise_for_status()  # HTTP 에러 발생 시 예외 발생
+    except requests.exceptions.RequestException as e:
+        print(f"페이지 요청 실패: {e}")
         return []
 
     soup = BeautifulSoup(response.text, "html.parser")
     image_urls = []
 
-    # 모든 img 태그에서 src 속성 추출
     for img_tag in soup.find_all("img"):
-        img_src = img_tag.get("src")
-        if img_src:  # src 속성이 있는 경우만 처리
-            # 절대 경로로 변경
-            if img_src.startswith("//"):
-                img_src = "https:" + img_src
-            elif img_src.startswith("/"):
-                img_src = base_url + img_src
-            image_urls.append(img_src)
+        img_src = img_tag.get("src") or img_tag.get("data-src") or img_tag.get("data-lazy-src")
+        if not img_src:
+            continue
+
+        img_src = urljoin(base_url, img_src)
+        original_url = convert_to_original_url(img_src)
+        image_urls.append((original_url, img_src))  # (원본 URL, 섬네일 URL) 튜플
 
     return image_urls
 
-# 4. 쿼리 파라미터 제거 및 파일 이름 생성 함수 
-# 건들지마
+# 쿼리 파라미터 제거 및 파일 이름 생성
 def sanitize_filename(url):
     parsed_url = urlparse(url)
-    filename = os.path.basename(parsed_url.path)  # 쿼리 파라미터 제거
-    filename = unquote(filename)  # URL 디코딩 (예: %20 -> 공백)
-    return filename
+    filename = os.path.basename(parsed_url.path)
+    return unquote(filename)
 
-# 5. 이미지 다운로드 함수 
-# 건들지마
-def download_image(image_url, save_path):
-    response = requests.get(image_url, stream=True)
-    if response.status_code == 200:
+# 이미지 다운로드 (에러 발생 시 섬네일로 대체 다운로드)
+def download_image(image_url, thumbnail_url, save_path):
+    try:
+        response = session.get(image_url, headers=headers, stream=True, timeout=(5, 30))
+        response.raise_for_status()
         with open(save_path, "wb") as file:
             for chunk in response.iter_content(1024):
                 file.write(chunk)
-        print(f"다운로드 완료: {save_path}")
-    else:
-        print(f"다운로드 실패: {image_url} (상태 코드: {response.status_code})")
+        print(f"원본 다운로드 완료: {save_path}")
+    except requests.exceptions.RequestException as e:
+        print(f"원본 다운로드 실패: {e}. 섬네일로 시도합니다.")
+        try:
+            response = session.get(thumbnail_url, headers=headers, stream=True, timeout=(5, 30))
+            response.raise_for_status()
+            with open(save_path, "wb") as file:
+                for chunk in response.iter_content(1024):
+                    file.write(chunk)
+            print(f"섬네일 다운로드 완료: {save_path}")
+        except requests.exceptions.RequestException as thumb_e:
+            print(f"섬네일 다운로드 실패: {thumb_e}")
 
-# 6. 실행하는곳 
-# 건들지마
+# 실행
 if __name__ == "__main__":
     print("이미지 URL 수집 중...")
     image_urls = get_image_urls(url)
@@ -66,12 +89,11 @@ if __name__ == "__main__":
         print("이미지를 찾지 못했습니다.")
     else:
         print(f"총 {len(image_urls)}개의 이미지를 찾았습니다.")
-        for img_url in image_urls:
-            # 파일 이름 정리
-            filename = sanitize_filename(img_url)
-            # 저장 경로 생성
+        for original_url, thumbnail_url in image_urls:
+            # 섬네일 URL에서 파일 이름 추출
+            filename = sanitize_filename(thumbnail_url)
             save_path = os.path.join(save_folder, filename)
             # 이미지 다운로드
-            download_image(img_url, save_path)
+            download_image(original_url, thumbnail_url, save_path)
 
     print("모든 다운로드가 완료되었습니다.")
